@@ -1,5 +1,7 @@
 #include <Arduino.h>
-#include <protocol.h>
+
+#include "protocol.h"
+#include "RobotNetwork.h"
 
 void setup()
 {
@@ -7,11 +9,24 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println("============================");
+    Serial.println("==============================");
     Serial.println(" ESP32 DISTRIBUTED ROBOT");
-    Serial.println("============================");
-    Serial.println("Node: MASTER");
-    Serial.println("Status: ONLINE");
+    Serial.println("==============================");
+
+    Serial.println("NODE: MASTER");
+
+    if (!RobotNetwork::begin())
+    {
+        Serial.println("NETWORK: FAILED");
+        return;
+    }
+
+    Serial.println("NETWORK: ONLINE");
+
+    RobotNetwork::printMacAddress();
+
+    Serial.print("PROTOCOL VERSION: ");
+    Serial.println(PROTOCOL_VERSION);
 }
 
 void loop()
