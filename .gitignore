@@ -1,0 +1,24 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code
+.vscode/
+
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Environment/secrets
+.env
+.env.*
+secrets.h
+include/secrets.h
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
