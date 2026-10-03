@@ -1,5 +1,9 @@
 #include "RobotNetwork.h"
 
+#include <esp_wifi.h>
+
+constexpr uint8_t ROBOT_WIFI_CHANNEL = 1;
+
 QueueHandle_t RobotNetwork::receiveQueue = nullptr;
 
 volatile bool RobotNetwork::sendSucceeded = false;
@@ -11,15 +15,89 @@ volatile bool RobotNetwork::sendSucceeded = false;
 
 bool RobotNetwork::begin()
 {
-    // ESP-NOW uses the Wi-Fi radio.
-    // We don't need to connect to a router.
+    // --------------------------------------------------------
+    // Start Wi-Fi in Station mode
+    // --------------------------------------------------------
+
     WiFi.mode(WIFI_STA);
 
-    // Create queue for incoming packets.
-    receiveQueue = xQueueCreate(
-        ROBOT_NETWORK_QUEUE_SIZE,
-        sizeof(NetworkMessage)
+    // Prevent the ESP32 from reconnecting to an old Wi-Fi
+    // network and changing our ESP-NOW channel.
+    WiFi.setAutoReconnect(false);
+
+    WiFi.disconnect();
+
+    delay(100);
+
+
+    // --------------------------------------------------------
+    // Force ESP-NOW radio onto channel 1
+    // --------------------------------------------------------
+
+    esp_err_t channelResult =
+        esp_wifi_set_channel(
+            ROBOT_WIFI_CHANNEL,
+            WIFI_SECOND_CHAN_NONE
+        );
+
+    if (channelResult != ESP_OK)
+    {
+        Serial.print(
+            "[NETWORK] Failed to set channel. Error: "
+        );
+
+        Serial.println(channelResult);
+
+        return false;
+    }
+
+
+    // --------------------------------------------------------
+    // Verify the ACTUAL Wi-Fi channel
+    // --------------------------------------------------------
+
+    uint8_t primaryChannel = 0;
+
+    wifi_second_chan_t secondaryChannel =
+        WIFI_SECOND_CHAN_NONE;
+
+    esp_err_t getChannelResult =
+        esp_wifi_get_channel(
+            &primaryChannel,
+            &secondaryChannel
+        );
+
+    if (getChannelResult != ESP_OK)
+    {
+        Serial.print(
+            "[NETWORK] Failed to read channel. Error: "
+        );
+
+        Serial.println(getChannelResult);
+
+        return false;
+    }
+
+
+    Serial.print(
+        "[NETWORK] Actual WiFi channel: "
     );
+
+    Serial.println(
+        primaryChannel
+    );
+
+
+    // --------------------------------------------------------
+    // Create incoming-packet queue
+    // --------------------------------------------------------
+
+    receiveQueue =
+        xQueueCreate(
+            ROBOT_NETWORK_QUEUE_SIZE,
+            sizeof(NetworkMessage)
+        );
+
 
     if (receiveQueue == nullptr)
     {
@@ -30,7 +108,11 @@ bool RobotNetwork::begin()
         return false;
     }
 
-    // Initialize ESP-NOW.
+
+    // --------------------------------------------------------
+    // Initialize ESP-NOW
+    // --------------------------------------------------------
+
     if (esp_now_init() != ESP_OK)
     {
         Serial.println(
@@ -40,8 +122,15 @@ bool RobotNetwork::begin()
         return false;
     }
 
-    // Register internal callbacks.
-    if (esp_now_register_recv_cb(handleReceive) != ESP_OK)
+
+    // --------------------------------------------------------
+    // Register callbacks
+    // --------------------------------------------------------
+
+    if (
+        esp_now_register_recv_cb(handleReceive)
+        != ESP_OK
+    )
     {
         Serial.println(
             "[NETWORK] Failed to register receive callback"
@@ -50,7 +139,11 @@ bool RobotNetwork::begin()
         return false;
     }
 
-    if (esp_now_register_send_cb(handleSend) != ESP_OK)
+
+    if (
+        esp_now_register_send_cb(handleSend)
+        != ESP_OK
+    )
     {
         Serial.println(
             "[NETWORK] Failed to register send callback"
@@ -58,6 +151,7 @@ bool RobotNetwork::begin()
 
         return false;
     }
+
 
     Serial.println(
         "[NETWORK] ESP-NOW initialized"
@@ -68,17 +162,31 @@ bool RobotNetwork::begin()
 
 
 // ============================================================
-// Add peer
+// Add ESP-NOW peer
 // ============================================================
 
-bool RobotNetwork::addPeer(const uint8_t mac[6])
+bool RobotNetwork::addPeer(
+    const uint8_t mac[6]
+)
 {
+    if (mac == nullptr)
+    {
+        return false;
+    }
+
+
     if (esp_now_is_peer_exist(mac))
     {
+        Serial.println(
+            "[NETWORK] Peer already registered"
+        );
+
         return true;
     }
 
+
     esp_now_peer_info_t peerInfo = {};
+
 
     memcpy(
         peerInfo.peer_addr,
@@ -86,19 +194,34 @@ bool RobotNetwork::addPeer(const uint8_t mac[6])
         6
     );
 
-    peerInfo.channel = 0;
 
-    peerInfo.ifidx = WIFI_IF_STA;
+    // IMPORTANT:
+    //
+    // Explicitly force peer to the same channel
+    // instead of using channel = 0.
 
-    peerInfo.encrypt = false;
+    peerInfo.channel =
+        ROBOT_WIFI_CHANNEL;
+
+
+    peerInfo.ifidx =
+        WIFI_IF_STA;
+
+
+    peerInfo.encrypt =
+        false;
+
 
     esp_err_t result =
-        esp_now_add_peer(&peerInfo);
+        esp_now_add_peer(
+            &peerInfo
+        );
+
 
     if (result != ESP_OK)
     {
         Serial.print(
-            "[NETWORK] Failed to add peer: "
+            "[NETWORK] Failed to add peer. Error: "
         );
 
         Serial.println(result);
@@ -106,9 +229,15 @@ bool RobotNetwork::addPeer(const uint8_t mac[6])
         return false;
     }
 
-    Serial.println(
-        "[NETWORK] Peer added"
+
+    Serial.print(
+        "[NETWORK] Peer added on channel "
     );
+
+    Serial.println(
+        ROBOT_WIFI_CHANNEL
+    );
+
 
     return true;
 }
@@ -124,24 +253,27 @@ bool RobotNetwork::send(
     size_t size
 )
 {
-    if (mac == nullptr || data == nullptr)
+    if (
+        mac == nullptr ||
+        data == nullptr
+    )
     {
         return false;
     }
 
-    if (size == 0)
+
+    if (
+        size == 0 ||
+        size > ROBOT_NETWORK_MAX_PACKET_SIZE
+    )
     {
         return false;
     }
 
-    if (size > ROBOT_NETWORK_MAX_PACKET_SIZE)
-    {
-        Serial.println(
-            "[NETWORK] Packet too large"
-        );
 
-        return false;
-    }
+    // Reset old delivery state
+    sendSucceeded = false;
+
 
     esp_err_t result =
         esp_now_send(
@@ -150,12 +282,25 @@ bool RobotNetwork::send(
             size
         );
 
-    return result == ESP_OK;
+
+    if (result != ESP_OK)
+    {
+        Serial.print(
+            "[NETWORK] esp_now_send error: "
+        );
+
+        Serial.println(result);
+
+        return false;
+    }
+
+
+    return true;
 }
 
 
 // ============================================================
-// Get packet from queue
+// Retrieve packet from queue
 // ============================================================
 
 bool RobotNetwork::receive(
@@ -167,6 +312,7 @@ bool RobotNetwork::receive(
         return false;
     }
 
+
     return xQueueReceive(
         receiveQueue,
         &message,
@@ -176,7 +322,7 @@ bool RobotNetwork::receive(
 
 
 // ============================================================
-// ESP-NOW RECEIVE CALLBACK
+// ESP-NOW receive callback
 // ============================================================
 
 void RobotNetwork::handleReceive(
@@ -185,12 +331,6 @@ void RobotNetwork::handleReceive(
     int length
 )
 {
-    // VERY IMPORTANT:
-    //
-    // This callback executes inside the Wi-Fi task.
-    // Don't do parsing, Serial spam, OLED drawing,
-    // motor control, etc. here.
-
     if (
         receiveQueue == nullptr ||
         mac == nullptr ||
@@ -199,6 +339,7 @@ void RobotNetwork::handleReceive(
     {
         return;
     }
+
 
     if (
         length <= 0 ||
@@ -211,7 +352,9 @@ void RobotNetwork::handleReceive(
         return;
     }
 
+
     NetworkMessage message = {};
+
 
     memcpy(
         message.senderMac,
@@ -219,8 +362,12 @@ void RobotNetwork::handleReceive(
         6
     );
 
+
     message.length =
-        static_cast<uint16_t>(length);
+        static_cast<uint16_t>(
+            length
+        );
+
 
     memcpy(
         message.data,
@@ -228,10 +375,8 @@ void RobotNetwork::handleReceive(
         length
     );
 
-    // Non-blocking.
-    //
-    // If the queue is full, the packet is dropped
-    // instead of blocking the Wi-Fi task.
+
+    // Never block the Wi-Fi task.
     xQueueSend(
         receiveQueue,
         &message,
@@ -241,7 +386,7 @@ void RobotNetwork::handleReceive(
 
 
 // ============================================================
-// ESP-NOW SEND CALLBACK
+// ESP-NOW send callback
 // ============================================================
 
 void RobotNetwork::handleSend(
@@ -250,12 +395,15 @@ void RobotNetwork::handleSend(
 )
 {
     sendSucceeded =
-        (status == ESP_NOW_SEND_SUCCESS);
+        (
+            status ==
+            ESP_NOW_SEND_SUCCESS
+        );
 }
 
 
 // ============================================================
-// Last send result
+// Return latest delivery status
 // ============================================================
 
 bool RobotNetwork::lastSendSucceeded()
@@ -265,7 +413,7 @@ bool RobotNetwork::lastSendSucceeded()
 
 
 // ============================================================
-// Print local MAC
+// Print station MAC
 // ============================================================
 
 void RobotNetwork::printMacAddress()

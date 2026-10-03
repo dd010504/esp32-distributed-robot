@@ -1,24 +1,138 @@
 #include <Arduino.h>
+#include <Wire.h>
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 #include "protocol.h"
 #include "RobotNetwork.h"
 
+// ============================================================
+// OLED configuration
+// ============================================================
+
+constexpr uint8_t OLED_SDA = 21;
+constexpr uint8_t OLED_SCL = 22;
+
+constexpr uint8_t OLED_ADDRESS = 0x3C;
+
+constexpr int SCREEN_WIDTH = 128;
+constexpr int SCREEN_HEIGHT = 64;
+
+Adafruit_SSD1306 display(
+    SCREEN_WIDTH,
+    SCREEN_HEIGHT,
+    &Wire,
+    -1
+);
 
 // ============================================================
-// Packet processing
+// Current robot state
+// ============================================================
+
+float latestDistanceCm = -1.0f;
+
+bool sensorSeen = false;
+
+unsigned long lastSensorPacketMs = 0;
+
+constexpr unsigned long SENSOR_TIMEOUT_MS = 5000;
+
+
+// ============================================================
+// Update OLED
+// ============================================================
+
+void updateDisplay()
+{
+    display.clearDisplay();
+
+    display.setTextColor(SSD1306_WHITE);
+
+    // --------------------------------------------------------
+    // Header
+    // --------------------------------------------------------
+
+    display.setTextSize(1);
+
+    display.setCursor(22, 0);
+    display.println("ROBOT CONTROL");
+
+    display.drawLine(
+        0,
+        10,
+        127,
+        10,
+        SSD1306_WHITE
+    );
+
+
+    // --------------------------------------------------------
+    // Sensor status
+    // --------------------------------------------------------
+
+    display.setCursor(0, 16);
+
+    bool sensorOnline =
+        sensorSeen &&
+        (millis() - lastSensorPacketMs < SENSOR_TIMEOUT_MS);
+
+    display.print("SENSOR: ");
+
+    if (sensorOnline)
+    {
+        display.println("ONLINE");
+    }
+    else
+    {
+        display.println("OFFLINE");
+    }
+
+
+    // --------------------------------------------------------
+    // Distance
+    // --------------------------------------------------------
+
+    display.setCursor(0, 30);
+
+    display.setTextSize(2);
+
+    if (latestDistanceCm < 0)
+    {
+        display.println("NO ECHO");
+    }
+    else
+    {
+        display.print(latestDistanceCm, 1);
+        display.println("cm");
+    }
+
+
+    // --------------------------------------------------------
+    // Mode
+    // --------------------------------------------------------
+
+    display.setTextSize(1);
+
+    display.setCursor(0, 53);
+    display.println("MODE: MANUAL");
+
+
+    // Push buffer to OLED
+    display.display();
+}
+
+
+// ============================================================
+// Process incoming ESP-NOW packet
 // ============================================================
 
 void processPacket(
     const NetworkMessage &message
 )
 {
-    // Make sure we at least received a header.
     if (message.length < sizeof(PacketHeader))
     {
-        Serial.println(
-            "[MASTER] Packet too small"
-        );
-
         return;
     }
 
@@ -32,7 +146,7 @@ void processPacket(
 
 
     // --------------------------------------------------------
-    // Check protocol version
+    // Validate protocol
     // --------------------------------------------------------
 
     if (
@@ -40,16 +154,12 @@ void processPacket(
         PROTOCOL_VERSION
     )
     {
-        Serial.println(
-            "[MASTER] Protocol version mismatch"
-        );
-
         return;
     }
 
 
     // --------------------------------------------------------
-    // Make sure packet is meant for MASTER
+    // Packet must be meant for MASTER
     // --------------------------------------------------------
 
     if (
@@ -61,142 +171,124 @@ void processPacket(
     }
 
 
-    // --------------------------------------------------------
-    // Determine packet type
-    // --------------------------------------------------------
+    // ========================================================
+    // SENSOR DATA
+    // ========================================================
 
-    switch (header.type)
+    if (
+        header.type ==
+        PacketType::SENSOR_DATA
+    )
     {
-
-        // ====================================================
-        // SENSOR DATA
-        // ====================================================
-
-        case PacketType::SENSOR_DATA:
+        if (
+            message.length !=
+            sizeof(SensorPacket)
+        )
         {
-            if (
-                message.length !=
-                sizeof(SensorPacket)
+            return;
+        }
+
+        SensorPacket packet;
+
+        memcpy(
+            &packet,
+            message.data,
+            sizeof(packet)
+        );
+
+
+        // Save telemetry
+        latestDistanceCm =
+            packet.distanceCm;
+
+        sensorSeen = true;
+
+        lastSensorPacketMs =
+            millis();
+
+
+        // Serial debug
+        Serial.print(
+            "[MASTER] Distance: "
+        );
+
+        if (latestDistanceCm < 0)
+        {
+            Serial.println(
+                "NO ECHO"
+            );
+        }
+        else
+        {
+            Serial.print(
+                latestDistanceCm,
+                1
+            );
+
+            Serial.println(
+                " cm"
+            );
+        }
+
+        return;
+    }
+
+
+    // ========================================================
+    // HEARTBEAT
+    // ========================================================
+
+    if (
+        header.type ==
+        PacketType::HEARTBEAT
+    )
+    {
+        if (
+            message.length !=
+            sizeof(HeartbeatPacket)
+        )
+        {
+            return;
+        }
+
+        HeartbeatPacket packet;
+
+        memcpy(
+            &packet,
+            message.data,
+            sizeof(packet)
+        );
+
+
+        if (
+            packet.header.source ==
+            NodeId::SENSOR
+        )
+        {
+            sensorSeen = true;
+
+            lastSensorPacketMs =
+                millis();
+        }
+
+
+        Serial.print(
+            "[MASTER] Heartbeat from node "
+        );
+
+        Serial.print(
+            static_cast<int>(
+                packet.header.source
             )
-            {
-                Serial.println(
-                    "[MASTER] Invalid SensorPacket size"
-                );
+        );
 
-                return;
-            }
+        Serial.print(
+            " | Sequence: "
+        );
 
-            SensorPacket packet;
-
-            memcpy(
-                &packet,
-                message.data,
-                sizeof(packet)
-            );
-
-            Serial.println();
-            Serial.println(
-                "------ SENSOR DATA ------"
-            );
-
-            Serial.print("Temperature: ");
-            Serial.println(packet.temperature);
-
-            Serial.print("Humidity: ");
-            Serial.println(packet.humidity);
-
-            Serial.print("Distance: ");
-            Serial.print(packet.distanceCm);
-            Serial.println(" cm");
-
-            Serial.print("Light: ");
-            Serial.println(packet.lightLevel);
-
-            Serial.print("Motion: ");
-
-            Serial.println(
-                packet.motionDetected
-                    ? "YES"
-                    : "NO"
-            );
-
-            Serial.print("Accel X: ");
-            Serial.println(packet.accelX);
-
-            Serial.print("Accel Y: ");
-            Serial.println(packet.accelY);
-
-            Serial.print("Accel Z: ");
-            Serial.println(packet.accelZ);
-
-            break;
-        }
-
-
-        // ====================================================
-        // HEARTBEAT
-        // ====================================================
-
-        case PacketType::HEARTBEAT:
-        {
-            if (
-                message.length !=
-                sizeof(HeartbeatPacket)
-            )
-            {
-                Serial.println(
-                    "[MASTER] Invalid heartbeat size"
-                );
-
-                return;
-            }
-
-            HeartbeatPacket packet;
-
-            memcpy(
-                &packet,
-                message.data,
-                sizeof(packet)
-            );
-
-            Serial.print(
-                "[MASTER] Heartbeat received from node "
-            );
-
-            Serial.print(
-                static_cast<int>(
-                    packet.header.source
-                )
-            );
-
-            Serial.print(
-                " | Sequence: "
-            );
-
-            Serial.print(
-                packet.sequenceNumber
-            );
-
-            Serial.print(
-                " | Uptime: "
-            );
-
-            Serial.println(
-                packet.uptimeMs
-            );
-
-            break;
-        }
-
-
-        default:
-        {
-            Serial.println(
-                "[MASTER] Unknown packet type"
-            );
-
-            break;
-        }
+        Serial.println(
+            packet.sequenceNumber
+        );
     }
 }
 
@@ -212,26 +304,66 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println(
-        "=============================="
+    Serial.println("==============================");
+    Serial.println(" ESP32 DISTRIBUTED ROBOT");
+    Serial.println("==============================");
+
+    Serial.println("NODE: MASTER");
+
+
+    // ========================================================
+    // OLED
+    // ========================================================
+
+    Wire.begin(
+        OLED_SDA,
+        OLED_SCL
     );
 
-    Serial.println(
-        " ESP32 DISTRIBUTED ROBOT"
+
+    if (
+        !display.begin(
+            SSD1306_SWITCHCAPVCC,
+            OLED_ADDRESS
+        )
+    )
+    {
+        Serial.println(
+            "[OLED] Initialization failed"
+        );
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+
+    display.clearDisplay();
+
+    display.setTextColor(
+        SSD1306_WHITE
     );
 
-    Serial.println(
-        "=============================="
+    display.setTextSize(1);
+
+    display.setCursor(10, 20);
+
+    display.println(
+        "Starting robot..."
     );
 
+    display.display();
+
+
     Serial.println(
-        "NODE: MASTER"
+        "[OLED] ONLINE"
     );
 
 
-    // --------------------------------------------------------
-    // Start networking
-    // --------------------------------------------------------
+    // ========================================================
+    // ESP-NOW
+    // ========================================================
 
     if (!RobotNetwork::begin())
     {
@@ -245,11 +377,13 @@ void setup()
         }
     }
 
+
     Serial.println(
         "NETWORK: ONLINE"
     );
 
     RobotNetwork::printMacAddress();
+
 
     Serial.print(
         "PROTOCOL VERSION: "
@@ -258,6 +392,11 @@ void setup()
     Serial.println(
         PROTOCOL_VERSION
     );
+
+
+    delay(500);
+
+    updateDisplay();
 }
 
 
@@ -267,9 +406,12 @@ void setup()
 
 void loop()
 {
+    // --------------------------------------------------------
+    // Process incoming packets
+    // --------------------------------------------------------
+
     NetworkMessage message;
 
-    // Process every waiting packet.
     while (
         RobotNetwork::receive(message)
     )
@@ -278,13 +420,39 @@ void loop()
     }
 
 
-    // Master heartbeat message for debugging.
-    static unsigned long previousHeartbeat = 0;
+    // --------------------------------------------------------
+    // Refresh OLED
+    // --------------------------------------------------------
 
-    unsigned long now = millis();
+    static unsigned long
+        previousDisplayUpdate = 0;
+
+    unsigned long now =
+        millis();
+
 
     if (
-        now - previousHeartbeat >= 2000
+        now - previousDisplayUpdate >=
+        100
+    )
+    {
+        previousDisplayUpdate = now;
+
+        updateDisplay();
+    }
+
+
+    // --------------------------------------------------------
+    // Debug heartbeat
+    // --------------------------------------------------------
+
+    static unsigned long
+        previousHeartbeat = 0;
+
+
+    if (
+        now - previousHeartbeat >=
+        2000
     )
     {
         previousHeartbeat = now;

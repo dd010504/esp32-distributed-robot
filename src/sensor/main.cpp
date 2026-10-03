@@ -26,26 +26,22 @@ uint32_t heartbeatSequence = 0;
 
 float readDistanceCm()
 {
-    // Start with trigger LOW
     digitalWrite(TRIG_PIN, LOW);
     delayMicroseconds(2);
 
-    // Send 10 microsecond pulse
     digitalWrite(TRIG_PIN, HIGH);
     delayMicroseconds(10);
+
     digitalWrite(TRIG_PIN, LOW);
 
-    // Measure ECHO pulse
     unsigned long duration =
         pulseIn(ECHO_PIN, HIGH, 30000UL);
 
-    // Timeout / no echo
     if (duration == 0)
     {
         return -1.0f;
     }
 
-    // Convert pulse duration to centimeters
     float distanceCm =
         duration * 0.0343f / 2.0f;
 
@@ -54,7 +50,7 @@ float readDistanceCm()
 
 
 // ============================================================
-// Send sensor telemetry to MASTER
+// Send sensor telemetry
 // ============================================================
 
 void sendSensorData()
@@ -74,12 +70,18 @@ void sendSensorData()
         PacketType::SENSOR_DATA;
 
 
-    // Real sensor data
+    // --------------------------------------------------------
+    // Actual ultrasonic reading
+    // --------------------------------------------------------
+
     packet.distanceCm =
         readDistanceCm();
 
 
-    // Sensors we haven't connected yet
+    // --------------------------------------------------------
+    // Future sensors
+    // --------------------------------------------------------
+
     packet.temperature = 0.0f;
     packet.humidity = 0.0f;
 
@@ -92,31 +94,77 @@ void sendSensorData()
     packet.motionDetected = 0;
 
 
-    bool sent = RobotNetwork::send(
-        MASTER_MAC,
-        &packet,
-        sizeof(packet)
+    // --------------------------------------------------------
+    // Send packet to Master
+    // --------------------------------------------------------
+
+    bool queued =
+        RobotNetwork::send(
+            MASTER_MAC,
+            &packet,
+            sizeof(packet)
+        );
+
+
+    if (!queued)
+    {
+        Serial.println(
+            "[SENSOR] Telemetry failed to queue"
+        );
+
+        return;
+    }
+
+
+    // Give ESP-NOW callback a moment to report delivery.
+    delay(20);
+
+
+    // --------------------------------------------------------
+    // Print ultrasonic reading
+    // --------------------------------------------------------
+
+    Serial.print(
+        "[SENSOR] Distance: "
     );
 
-
-    if (sent)
+    if (packet.distanceCm < 0)
     {
-        Serial.print("[SENSOR] Distance: ");
+        Serial.println(
+            "NO ECHO"
+        );
+    }
+    else
+    {
+        Serial.print(
+            packet.distanceCm,
+            1
+        );
 
-        if (packet.distanceCm < 0)
-        {
-            Serial.println("NO ECHO");
-        }
-        else
-        {
-            Serial.print(packet.distanceCm, 1);
-            Serial.println(" cm");
-        }
+        Serial.println(
+            " cm"
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // Print actual ESP-NOW delivery result
+    // --------------------------------------------------------
+
+    Serial.print(
+        "[SENSOR] ESP-NOW delivery: "
+    );
+
+    if (RobotNetwork::lastSendSucceeded())
+    {
+        Serial.println(
+            "SUCCESS"
+        );
     }
     else
     {
         Serial.println(
-            "[SENSOR] Telemetry send failed"
+            "FAILED"
         );
     }
 }
@@ -149,11 +197,20 @@ void sendHeartbeat()
         ++heartbeatSequence;
 
 
-    RobotNetwork::send(
-        MASTER_MAC,
-        &heartbeat,
-        sizeof(heartbeat)
-    );
+    bool queued =
+        RobotNetwork::send(
+            MASTER_MAC,
+            &heartbeat,
+            sizeof(heartbeat)
+        );
+
+
+    if (!queued)
+    {
+        Serial.println(
+            "[SENSOR] Heartbeat failed to queue"
+        );
+    }
 }
 
 
@@ -164,26 +221,48 @@ void sendHeartbeat()
 void setup()
 {
     Serial.begin(115200);
+
     delay(1000);
 
     Serial.println();
     Serial.println("==============================");
     Serial.println(" ESP32 DISTRIBUTED ROBOT");
     Serial.println("==============================");
-    Serial.println("NODE: SENSOR");
+
+    Serial.println(
+        "NODE: SENSOR"
+    );
 
 
+    // --------------------------------------------------------
     // Ultrasonic sensor setup
-    pinMode(TRIG_PIN, OUTPUT);
-    pinMode(ECHO_PIN, INPUT);
+    // --------------------------------------------------------
 
-    digitalWrite(TRIG_PIN, LOW);
+    pinMode(
+        TRIG_PIN,
+        OUTPUT
+    );
+
+    pinMode(
+        ECHO_PIN,
+        INPUT
+    );
+
+    digitalWrite(
+        TRIG_PIN,
+        LOW
+    );
 
 
-    // Start ESP-NOW
+    // --------------------------------------------------------
+    // ESP-NOW setup
+    // --------------------------------------------------------
+
     if (!RobotNetwork::begin())
     {
-        Serial.println("NETWORK: FAILED");
+        Serial.println(
+            "NETWORK: FAILED"
+        );
 
         while (true)
         {
@@ -191,12 +270,17 @@ void setup()
         }
     }
 
-    Serial.println("NETWORK: ONLINE");
+    Serial.println(
+        "NETWORK: ONLINE"
+    );
 
     RobotNetwork::printMacAddress();
 
 
-    // Register MASTER
+    // --------------------------------------------------------
+    // Register Master as ESP-NOW peer
+    // --------------------------------------------------------
+
     if (!RobotNetwork::addPeer(MASTER_MAC))
     {
         Serial.println(
@@ -225,13 +309,17 @@ void setup()
 
 void loop()
 {
-    unsigned long now = millis();
+    unsigned long now =
+        millis();
 
     static unsigned long previousTelemetry = 0;
     static unsigned long previousHeartbeat = 0;
 
 
-    // Send distance data
+    // --------------------------------------------------------
+    // Distance telemetry
+    // --------------------------------------------------------
+
     if (
         now - previousTelemetry >=
         TELEMETRY_INTERVAL_MS
@@ -243,7 +331,10 @@ void loop()
     }
 
 
-    // Send heartbeat
+    // --------------------------------------------------------
+    // Heartbeat
+    // --------------------------------------------------------
+
     if (
         now - previousHeartbeat >=
         HEARTBEAT_INTERVAL_MS
