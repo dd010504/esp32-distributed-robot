@@ -62,3 +62,5 @@ struct HeartbeatPacket
     uint32_t uptimeMs;
     uint32_t sequenceNumber;
 };
+
+static_assert(sizeof(PacketHeader) == 4, "Unexpected PacketHeader size");
