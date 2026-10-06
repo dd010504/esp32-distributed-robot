@@ -5,6 +5,7 @@
 #include <Adafruit_SSD1306.h>
 
 #include "protocol.h"
+#include "node_config.h"
 #include "RobotNetwork.h"
 
 // ============================================================
@@ -26,11 +27,10 @@ Adafruit_SSD1306 display(
 );
 
 // ============================================================
-// Latest sensor state
+// Sensor state
 // ============================================================
 
 float latestDistanceCm = -1.0f;
-
 bool latestMotionDetected = false;
 
 bool sensorSeen = false;
@@ -41,26 +41,36 @@ constexpr unsigned long SENSOR_TIMEOUT_MS = 5000;
 
 
 // ============================================================
-// Update OLED
+// Actuator test state
+// ============================================================
+
+bool actuatorTestState = false;
+
+constexpr unsigned long ACTUATOR_COMMAND_INTERVAL_MS = 3000;
+
+
+// ============================================================
+// Update MASTER OLED
 // ============================================================
 
 void updateDisplay()
 {
     display.clearDisplay();
+
     display.setTextColor(SSD1306_WHITE);
-
-    // =========================================
-    // YELLOW AREA: pixels 0-15
-    // =========================================
-
     display.setTextSize(1);
+
+    // --------------------------------------------------------
+    // Yellow section
+    // --------------------------------------------------------
+
     display.setCursor(22, 3);
     display.println("ROBOT CONTROL");
 
 
-    // =========================================
-    // BLUE AREA: pixels 16-63
-    // =========================================
+    // --------------------------------------------------------
+    // Determine sensor online state
+    // --------------------------------------------------------
 
     bool sensorOnline =
         sensorSeen &&
@@ -70,7 +80,10 @@ void updateDisplay()
         );
 
 
+    // --------------------------------------------------------
     // Sensor status
+    // --------------------------------------------------------
+
     display.setCursor(0, 18);
 
     display.print("SENSOR: ");
@@ -85,7 +98,10 @@ void updateDisplay()
     }
 
 
+    // --------------------------------------------------------
     // Distance
+    // --------------------------------------------------------
+
     display.setCursor(0, 29);
 
     display.print("DIST: ");
@@ -101,38 +117,163 @@ void updateDisplay()
     }
 
 
+    // --------------------------------------------------------
     // Motion
+    // --------------------------------------------------------
+
     display.setCursor(0, 41);
 
     display.print("MOTION: ");
 
-    if (latestMotionDetected)
-    {
-        display.println("YES");
-    }
-    else
-    {
-        display.println("NO");
-    }
+    display.println(
+        latestMotionDetected
+            ? "YES"
+            : "NO"
+    );
 
 
+    // --------------------------------------------------------
     // Mode
+    // --------------------------------------------------------
+
     display.setCursor(0, 53);
+
     display.println("MODE: MANUAL");
 
 
     display.display();
 }
 
+
 // ============================================================
-// Process received ESP-NOW packet
+// Send test command to ACTUATOR
+// ============================================================
+
+void sendActuatorCommand()
+{
+    ActuatorCommand command = {};
+
+    command.header.protocolVersion =
+        PROTOCOL_VERSION;
+
+    command.header.source =
+        NodeId::MASTER;
+
+    command.header.destination =
+        NodeId::ACTUATOR;
+
+    command.header.type =
+        PacketType::ACTUATOR_COMMAND;
+
+
+    // Alternate between two states
+    actuatorTestState =
+        !actuatorTestState;
+
+
+    if (actuatorTestState)
+    {
+        command.servoAngle = 45;
+        command.motorSpeed = 50;
+        command.buzzerEnabled = 1;
+        command.relayEnabled = 0;
+    }
+    else
+    {
+        command.servoAngle = 135;
+        command.motorSpeed = 0;
+        command.buzzerEnabled = 0;
+        command.relayEnabled = 1;
+    }
+
+
+    bool queued =
+        RobotNetwork::send(
+            ACTUATOR_MAC,
+            &command,
+            sizeof(command)
+        );
+
+
+    if (!queued)
+    {
+        Serial.println(
+            "[MASTER] Actuator command failed to queue"
+        );
+
+        return;
+    }
+
+
+    delay(20);
+
+
+    Serial.println();
+    Serial.println(
+        "---- SENT ACTUATOR COMMAND ----"
+    );
+
+
+    Serial.print(
+        "Servo: "
+    );
+
+    Serial.println(
+        command.servoAngle
+    );
+
+
+    Serial.print(
+        "Motor: "
+    );
+
+    Serial.println(
+        command.motorSpeed
+    );
+
+
+    Serial.print(
+        "Buzzer: "
+    );
+
+    Serial.println(
+        command.buzzerEnabled
+            ? "ON"
+            : "OFF"
+    );
+
+
+    Serial.print(
+        "Relay: "
+    );
+
+    Serial.println(
+        command.relayEnabled
+            ? "ON"
+            : "OFF"
+    );
+
+
+    Serial.print(
+        "Delivery: "
+    );
+
+    Serial.println(
+        RobotNetwork::lastSendSucceeded()
+            ? "SUCCESS"
+            : "FAILED"
+    );
+}
+
+
+// ============================================================
+// Process received packets
 // ============================================================
 
 void processPacket(
     const NetworkMessage &message
 )
 {
-    // Packet must at least contain a header.
     if (
         message.length <
         sizeof(PacketHeader)
@@ -151,26 +292,14 @@ void processPacket(
     );
 
 
-    // --------------------------------------------------------
-    // Validate protocol version
-    // --------------------------------------------------------
-
     if (
         header.protocolVersion !=
         PROTOCOL_VERSION
     )
     {
-        Serial.println(
-            "[MASTER] Protocol version mismatch"
-        );
-
         return;
     }
 
-
-    // --------------------------------------------------------
-    // Packet must belong to MASTER
-    // --------------------------------------------------------
 
     if (
         header.destination !=
@@ -195,10 +324,6 @@ void processPacket(
             sizeof(SensorPacket)
         )
         {
-            Serial.println(
-                "[MASTER] Invalid SensorPacket size"
-            );
-
             return;
         }
 
@@ -212,10 +337,6 @@ void processPacket(
         );
 
 
-        // ----------------------------------------------------
-        // Save latest telemetry
-        // ----------------------------------------------------
-
         latestDistanceCm =
             packet.distanceCm;
 
@@ -227,10 +348,6 @@ void processPacket(
         lastSensorPacketMs =
             millis();
 
-
-        // ----------------------------------------------------
-        // Serial debug
-        // ----------------------------------------------------
 
         Serial.print(
             "[MASTER] Distance: "
@@ -340,7 +457,9 @@ void setup()
 
     delay(1000);
 
+
     Serial.println();
+
     Serial.println(
         "=============================="
     );
@@ -358,9 +477,9 @@ void setup()
     );
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // OLED setup
-    // --------------------------------------------------------
+    // ========================================================
 
     Wire.begin(
         OLED_SDA,
@@ -394,7 +513,10 @@ void setup()
 
     display.setTextSize(1);
 
-    display.setCursor(10, 20);
+    display.setCursor(
+        10,
+        20
+    );
 
     display.println(
         "Starting robot..."
@@ -408,9 +530,9 @@ void setup()
     );
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // ESP-NOW setup
-    // --------------------------------------------------------
+    // ========================================================
 
     if (!RobotNetwork::begin())
     {
@@ -430,6 +552,32 @@ void setup()
     );
 
     RobotNetwork::printMacAddress();
+
+
+    // ========================================================
+    // Register ACTUATOR as a peer
+    // ========================================================
+
+    if (
+        !RobotNetwork::addPeer(
+            ACTUATOR_MAC
+        )
+    )
+    {
+        Serial.println(
+            "[MASTER] Failed to register ACTUATOR"
+        );
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+
+    Serial.println(
+        "[MASTER] ACTUATOR peer registered"
+    );
 
 
     Serial.print(
@@ -453,9 +601,9 @@ void setup()
 
 void loop()
 {
-    // --------------------------------------------------------
-    // Process received packets
-    // --------------------------------------------------------
+    // ========================================================
+    // Receive sensor packets
+    // ========================================================
 
     NetworkMessage message;
 
@@ -471,9 +619,9 @@ void loop()
         millis();
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // Refresh OLED
-    // --------------------------------------------------------
+    // ========================================================
 
     static unsigned long
         previousDisplayUpdate = 0;
@@ -490,23 +638,21 @@ void loop()
     }
 
 
-    // --------------------------------------------------------
-    // Debug heartbeat
-    // --------------------------------------------------------
+    // ========================================================
+    // Send actuator test command
+    // ========================================================
 
     static unsigned long
-        previousHeartbeat = 0;
+        previousActuatorCommand = 0;
 
 
     if (
-        now - previousHeartbeat >=
-        2000
+        now - previousActuatorCommand >=
+        ACTUATOR_COMMAND_INTERVAL_MS
     )
     {
-        previousHeartbeat = now;
+        previousActuatorCommand = now;
 
-        Serial.println(
-            "[MASTER] Running"
-        );
+        sendActuatorCommand();
     }
 }
