@@ -1,23 +1,56 @@
 #include <Arduino.h>
+#include <Wire.h>
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 #include "protocol.h"
 #include "node_config.h"
 #include "RobotNetwork.h"
 
 // ============================================================
-// Ultrasonic sensor pins
+// Sensor pins
 // ============================================================
 
 constexpr uint8_t TRIG_PIN = 25;
 constexpr uint8_t ECHO_PIN = 26;
+constexpr uint8_t PIR_PIN = 27;
 
-// Send telemetry 4 times per second
+// ============================================================
+// OLED configuration
+// ============================================================
+
+constexpr uint8_t OLED_SDA = 21;
+constexpr uint8_t OLED_SCL = 22;
+constexpr uint8_t OLED_ADDRESS = 0x3C;
+
+constexpr int SCREEN_WIDTH = 128;
+constexpr int SCREEN_HEIGHT = 64;
+
+Adafruit_SSD1306 display(
+    SCREEN_WIDTH,
+    SCREEN_HEIGHT,
+    &Wire,
+    -1
+);
+
+// ============================================================
+// Timing
+// ============================================================
+
 constexpr unsigned long TELEMETRY_INTERVAL_MS = 250;
-
-// Send heartbeat every 2 seconds
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 2000;
+constexpr unsigned long DISPLAY_INTERVAL_MS = 100;
+
+// ============================================================
+// State
+// ============================================================
 
 uint32_t heartbeatSequence = 0;
+
+float latestDistanceCm = -1.0f;
+bool latestMotionDetected = false;
+bool latestDeliverySuccess = false;
 
 
 // ============================================================
@@ -42,10 +75,85 @@ float readDistanceCm()
         return -1.0f;
     }
 
-    float distanceCm =
-        duration * 0.0343f / 2.0f;
+    return duration * 0.0343f / 2.0f;
+}
 
-    return distanceCm;
+
+// ============================================================
+// Read PIR motion sensor
+// ============================================================
+
+bool readMotion()
+{
+    return digitalRead(PIR_PIN) == HIGH;
+}
+
+
+// ============================================================
+// Update SENSOR OLED
+// ============================================================
+
+void updateDisplay()
+{
+    display.clearDisplay();
+
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+
+    // --------------------------------------------------------
+    // Yellow section: rows 0-15
+    // --------------------------------------------------------
+
+    display.setCursor(26, 3);
+    display.println("SENSOR NODE");
+
+    // --------------------------------------------------------
+    // Blue section: rows 16-63
+    // --------------------------------------------------------
+
+    display.setCursor(0, 18);
+
+    display.print("DIST: ");
+
+    if (latestDistanceCm < 0)
+    {
+        display.println("NO ECHO");
+    }
+    else
+    {
+        display.print(latestDistanceCm, 1);
+        display.println(" cm");
+    }
+
+
+    display.setCursor(0, 30);
+
+    display.print("MOTION: ");
+
+    display.println(
+        latestMotionDetected
+            ? "YES"
+            : "NO"
+    );
+
+
+    display.setCursor(0, 42);
+
+    display.print("LINK: ");
+
+    display.println(
+        latestDeliverySuccess
+            ? "OK"
+            : "FAIL"
+    );
+
+
+    display.setCursor(0, 54);
+
+    display.println("NODE: SENSOR");
+
+
+    display.display();
 }
 
 
@@ -71,11 +179,21 @@ void sendSensorData()
 
 
     // --------------------------------------------------------
-    // Actual ultrasonic reading
+    // Read real sensors
     // --------------------------------------------------------
 
-    packet.distanceCm =
+    latestDistanceCm =
         readDistanceCm();
+
+    latestMotionDetected =
+        readMotion();
+
+
+    packet.distanceCm =
+        latestDistanceCm;
+
+    packet.motionDetected =
+        latestMotionDetected ? 1 : 0;
 
 
     // --------------------------------------------------------
@@ -91,11 +209,9 @@ void sendSensorData()
     packet.accelY = 0.0f;
     packet.accelZ = 0.0f;
 
-    packet.motionDetected = 0;
-
 
     // --------------------------------------------------------
-    // Send packet to Master
+    // Send to MASTER
     // --------------------------------------------------------
 
     bool queued =
@@ -108,6 +224,8 @@ void sendSensorData()
 
     if (!queued)
     {
+        latestDeliverySuccess = false;
+
         Serial.println(
             "[SENSOR] Telemetry failed to queue"
         );
@@ -116,19 +234,22 @@ void sendSensorData()
     }
 
 
-    // Give ESP-NOW callback a moment to report delivery.
+    // Give send callback time to update.
     delay(20);
+
+    latestDeliverySuccess =
+        RobotNetwork::lastSendSucceeded();
 
 
     // --------------------------------------------------------
-    // Print ultrasonic reading
+    // Serial debug
     // --------------------------------------------------------
 
     Serial.print(
         "[SENSOR] Distance: "
     );
 
-    if (packet.distanceCm < 0)
+    if (latestDistanceCm < 0)
     {
         Serial.println(
             "NO ECHO"
@@ -137,7 +258,7 @@ void sendSensorData()
     else
     {
         Serial.print(
-            packet.distanceCm,
+            latestDistanceCm,
             1
         );
 
@@ -147,26 +268,26 @@ void sendSensorData()
     }
 
 
-    // --------------------------------------------------------
-    // Print actual ESP-NOW delivery result
-    // --------------------------------------------------------
+    Serial.print(
+        "[SENSOR] Motion: "
+    );
+
+    Serial.println(
+        latestMotionDetected
+            ? "YES"
+            : "NO"
+    );
+
 
     Serial.print(
         "[SENSOR] ESP-NOW delivery: "
     );
 
-    if (RobotNetwork::lastSendSucceeded())
-    {
-        Serial.println(
-            "SUCCESS"
-        );
-    }
-    else
-    {
-        Serial.println(
-            "FAILED"
-        );
-    }
+    Serial.println(
+        latestDeliverySuccess
+            ? "SUCCESS"
+            : "FAILED"
+    );
 }
 
 
@@ -197,20 +318,11 @@ void sendHeartbeat()
         ++heartbeatSequence;
 
 
-    bool queued =
-        RobotNetwork::send(
-            MASTER_MAC,
-            &heartbeat,
-            sizeof(heartbeat)
-        );
-
-
-    if (!queued)
-    {
-        Serial.println(
-            "[SENSOR] Heartbeat failed to queue"
-        );
-    }
+    RobotNetwork::send(
+        MASTER_MAC,
+        &heartbeat,
+        sizeof(heartbeat)
+    );
 }
 
 
@@ -225,9 +337,17 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println("==============================");
-    Serial.println(" ESP32 DISTRIBUTED ROBOT");
-    Serial.println("==============================");
+    Serial.println(
+        "=============================="
+    );
+
+    Serial.println(
+        " ESP32 DISTRIBUTED ROBOT"
+    );
+
+    Serial.println(
+        "=============================="
+    );
 
     Serial.println(
         "NODE: SENSOR"
@@ -235,22 +355,66 @@ void setup()
 
 
     // --------------------------------------------------------
-    // Ultrasonic sensor setup
+    // Sensor setup
     // --------------------------------------------------------
 
-    pinMode(
-        TRIG_PIN,
-        OUTPUT
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    pinMode(PIR_PIN, INPUT);
+
+    digitalWrite(TRIG_PIN, LOW);
+
+
+    // --------------------------------------------------------
+    // OLED setup
+    // --------------------------------------------------------
+
+    Wire.begin(
+        OLED_SDA,
+        OLED_SCL
     );
 
-    pinMode(
-        ECHO_PIN,
-        INPUT
+
+    if (
+        !display.begin(
+            SSD1306_SWITCHCAPVCC,
+            OLED_ADDRESS
+        )
+    )
+    {
+        Serial.println(
+            "[OLED] Initialization failed"
+        );
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+
+    display.clearDisplay();
+
+    display.setTextColor(
+        SSD1306_WHITE
     );
 
-    digitalWrite(
-        TRIG_PIN,
-        LOW
+    display.setTextSize(1);
+
+    display.setCursor(
+        14,
+        24
+    );
+
+    display.println(
+        "Starting sensor..."
+    );
+
+    display.display();
+
+
+    Serial.println(
+        "[OLED] ONLINE"
     );
 
 
@@ -270,16 +434,13 @@ void setup()
         }
     }
 
+
     Serial.println(
         "NETWORK: ONLINE"
     );
 
     RobotNetwork::printMacAddress();
 
-
-    // --------------------------------------------------------
-    // Register Master as ESP-NOW peer
-    // --------------------------------------------------------
 
     if (!RobotNetwork::addPeer(MASTER_MAC))
     {
@@ -293,6 +454,7 @@ void setup()
         }
     }
 
+
     Serial.println(
         "[SENSOR] MASTER peer registered"
     );
@@ -300,6 +462,15 @@ void setup()
     Serial.println(
         "[SENSOR] Ultrasonic telemetry online"
     );
+
+    Serial.println(
+        "[SENSOR] PIR motion sensor online"
+    );
+
+
+    delay(500);
+
+    updateDisplay();
 }
 
 
@@ -314,10 +485,11 @@ void loop()
 
     static unsigned long previousTelemetry = 0;
     static unsigned long previousHeartbeat = 0;
+    static unsigned long previousDisplayUpdate = 0;
 
 
     // --------------------------------------------------------
-    // Distance telemetry
+    // Sensor telemetry
     // --------------------------------------------------------
 
     if (
@@ -343,5 +515,20 @@ void loop()
         previousHeartbeat = now;
 
         sendHeartbeat();
+    }
+
+
+    // --------------------------------------------------------
+    // OLED refresh
+    // --------------------------------------------------------
+
+    if (
+        now - previousDisplayUpdate >=
+        DISPLAY_INTERVAL_MS
+    )
+    {
+        previousDisplayUpdate = now;
+
+        updateDisplay();
     }
 }

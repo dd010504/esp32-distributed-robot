@@ -13,7 +13,6 @@
 
 constexpr uint8_t OLED_SDA = 21;
 constexpr uint8_t OLED_SCL = 22;
-
 constexpr uint8_t OLED_ADDRESS = 0x3C;
 
 constexpr int SCREEN_WIDTH = 128;
@@ -27,10 +26,12 @@ Adafruit_SSD1306 display(
 );
 
 // ============================================================
-// Current robot state
+// Latest sensor state
 // ============================================================
 
 float latestDistanceCm = -1.0f;
+
+bool latestMotionDetected = false;
 
 bool sensorSeen = false;
 
@@ -46,36 +47,31 @@ constexpr unsigned long SENSOR_TIMEOUT_MS = 5000;
 void updateDisplay()
 {
     display.clearDisplay();
-
     display.setTextColor(SSD1306_WHITE);
 
-    // --------------------------------------------------------
-    // Header
-    // --------------------------------------------------------
+    // =========================================
+    // YELLOW AREA: pixels 0-15
+    // =========================================
 
     display.setTextSize(1);
-
-    display.setCursor(22, 0);
+    display.setCursor(22, 3);
     display.println("ROBOT CONTROL");
 
-    display.drawLine(
-        0,
-        10,
-        127,
-        10,
-        SSD1306_WHITE
-    );
 
-
-    // --------------------------------------------------------
-    // Sensor status
-    // --------------------------------------------------------
-
-    display.setCursor(0, 16);
+    // =========================================
+    // BLUE AREA: pixels 16-63
+    // =========================================
 
     bool sensorOnline =
         sensorSeen &&
-        (millis() - lastSensorPacketMs < SENSOR_TIMEOUT_MS);
+        (
+            millis() - lastSensorPacketMs <
+            SENSOR_TIMEOUT_MS
+        );
+
+
+    // Sensor status
+    display.setCursor(0, 18);
 
     display.print("SENSOR: ");
 
@@ -89,13 +85,10 @@ void updateDisplay()
     }
 
 
-    // --------------------------------------------------------
     // Distance
-    // --------------------------------------------------------
+    display.setCursor(0, 29);
 
-    display.setCursor(0, 30);
-
-    display.setTextSize(2);
+    display.print("DIST: ");
 
     if (latestDistanceCm < 0)
     {
@@ -104,49 +97,62 @@ void updateDisplay()
     else
     {
         display.print(latestDistanceCm, 1);
-        display.println("cm");
+        display.println(" cm");
     }
 
 
-    // --------------------------------------------------------
+    // Motion
+    display.setCursor(0, 41);
+
+    display.print("MOTION: ");
+
+    if (latestMotionDetected)
+    {
+        display.println("YES");
+    }
+    else
+    {
+        display.println("NO");
+    }
+
+
     // Mode
-    // --------------------------------------------------------
-
-    display.setTextSize(1);
-
     display.setCursor(0, 53);
     display.println("MODE: MANUAL");
 
 
-    // Push buffer to OLED
     display.display();
 }
 
-
 // ============================================================
-// Process incoming ESP-NOW packet
+// Process received ESP-NOW packet
 // ============================================================
 
 void processPacket(
     const NetworkMessage &message
 )
 {
-    if (message.length < sizeof(PacketHeader))
+    // Packet must at least contain a header.
+    if (
+        message.length <
+        sizeof(PacketHeader)
+    )
     {
         return;
     }
+
 
     PacketHeader header;
 
     memcpy(
         &header,
         message.data,
-        sizeof(PacketHeader)
+        sizeof(header)
     );
 
 
     // --------------------------------------------------------
-    // Validate protocol
+    // Validate protocol version
     // --------------------------------------------------------
 
     if (
@@ -154,12 +160,16 @@ void processPacket(
         PROTOCOL_VERSION
     )
     {
+        Serial.println(
+            "[MASTER] Protocol version mismatch"
+        );
+
         return;
     }
 
 
     // --------------------------------------------------------
-    // Packet must be meant for MASTER
+    // Packet must belong to MASTER
     // --------------------------------------------------------
 
     if (
@@ -185,8 +195,13 @@ void processPacket(
             sizeof(SensorPacket)
         )
         {
+            Serial.println(
+                "[MASTER] Invalid SensorPacket size"
+            );
+
             return;
         }
+
 
         SensorPacket packet;
 
@@ -197,9 +212,15 @@ void processPacket(
         );
 
 
-        // Save telemetry
+        // ----------------------------------------------------
+        // Save latest telemetry
+        // ----------------------------------------------------
+
         latestDistanceCm =
             packet.distanceCm;
+
+        latestMotionDetected =
+            packet.motionDetected != 0;
 
         sensorSeen = true;
 
@@ -207,7 +228,10 @@ void processPacket(
             millis();
 
 
+        // ----------------------------------------------------
         // Serial debug
+        // ----------------------------------------------------
+
         Serial.print(
             "[MASTER] Distance: "
         );
@@ -230,6 +254,18 @@ void processPacket(
             );
         }
 
+
+        Serial.print(
+            "[MASTER] Motion: "
+        );
+
+        Serial.println(
+            latestMotionDetected
+                ? "YES"
+                : "NO"
+        );
+
+
         return;
     }
 
@@ -250,6 +286,7 @@ void processPacket(
         {
             return;
         }
+
 
         HeartbeatPacket packet;
 
@@ -304,16 +341,26 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println("==============================");
-    Serial.println(" ESP32 DISTRIBUTED ROBOT");
-    Serial.println("==============================");
+    Serial.println(
+        "=============================="
+    );
 
-    Serial.println("NODE: MASTER");
+    Serial.println(
+        " ESP32 DISTRIBUTED ROBOT"
+    );
+
+    Serial.println(
+        "=============================="
+    );
+
+    Serial.println(
+        "NODE: MASTER"
+    );
 
 
-    // ========================================================
-    // OLED
-    // ========================================================
+    // --------------------------------------------------------
+    // OLED setup
+    // --------------------------------------------------------
 
     Wire.begin(
         OLED_SDA,
@@ -361,9 +408,9 @@ void setup()
     );
 
 
-    // ========================================================
-    // ESP-NOW
-    // ========================================================
+    // --------------------------------------------------------
+    // ESP-NOW setup
+    // --------------------------------------------------------
 
     if (!RobotNetwork::begin())
     {
@@ -407,7 +454,7 @@ void setup()
 void loop()
 {
     // --------------------------------------------------------
-    // Process incoming packets
+    // Process received packets
     // --------------------------------------------------------
 
     NetworkMessage message;
@@ -420,15 +467,16 @@ void loop()
     }
 
 
+    unsigned long now =
+        millis();
+
+
     // --------------------------------------------------------
     // Refresh OLED
     // --------------------------------------------------------
 
     static unsigned long
         previousDisplayUpdate = 0;
-
-    unsigned long now =
-        millis();
 
 
     if (
