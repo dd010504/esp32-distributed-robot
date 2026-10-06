@@ -39,14 +39,18 @@ unsigned long lastSensorPacketMs = 0;
 
 constexpr unsigned long SENSOR_TIMEOUT_MS = 5000;
 
-
 // ============================================================
-// Actuator test state
+// Actuator state
 // ============================================================
 
-bool actuatorTestState = false;
+int16_t commandedServoAngle = 90;
+
+bool actuatorCommandDelivered = false;
 
 constexpr unsigned long ACTUATOR_COMMAND_INTERVAL_MS = 3000;
+
+// Alternates between 45 and 135 degrees.
+bool servoTestState = false;
 
 
 // ============================================================
@@ -60,17 +64,17 @@ void updateDisplay()
     display.setTextColor(SSD1306_WHITE);
     display.setTextSize(1);
 
-    // --------------------------------------------------------
-    // Yellow section
-    // --------------------------------------------------------
+    // ========================================================
+    // Yellow header
+    // ========================================================
 
     display.setCursor(22, 3);
     display.println("ROBOT CONTROL");
 
 
-    // --------------------------------------------------------
-    // Determine sensor online state
-    // --------------------------------------------------------
+    // ========================================================
+    // Sensor status
+    // ========================================================
 
     bool sensorOnline =
         sensorSeen &&
@@ -79,10 +83,6 @@ void updateDisplay()
             SENSOR_TIMEOUT_MS
         );
 
-
-    // --------------------------------------------------------
-    // Sensor status
-    // --------------------------------------------------------
 
     display.setCursor(0, 18);
 
@@ -98,9 +98,9 @@ void updateDisplay()
     }
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // Distance
-    // --------------------------------------------------------
+    // ========================================================
 
     display.setCursor(0, 29);
 
@@ -117,9 +117,9 @@ void updateDisplay()
     }
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // Motion
-    // --------------------------------------------------------
+    // ========================================================
 
     display.setCursor(0, 41);
 
@@ -132,13 +132,25 @@ void updateDisplay()
     );
 
 
-    // --------------------------------------------------------
-    // Mode
-    // --------------------------------------------------------
+    // ========================================================
+    // Servo command
+    // ========================================================
 
     display.setCursor(0, 53);
 
-    display.println("MODE: MANUAL");
+    display.print("SERVO:");
+
+    display.print(
+        commandedServoAngle
+    );
+
+    display.print(" ");
+
+    display.println(
+        actuatorCommandDelivered
+            ? "OK"
+            : "WAIT"
+    );
 
 
     display.display();
@@ -146,12 +158,17 @@ void updateDisplay()
 
 
 // ============================================================
-// Send test command to ACTUATOR
+// Send command to ACTUATOR
 // ============================================================
 
 void sendActuatorCommand()
 {
     ActuatorCommand command = {};
+
+
+    // --------------------------------------------------------
+    // Packet header
+    // --------------------------------------------------------
 
     command.header.protocolVersion =
         PROTOCOL_VERSION;
@@ -166,26 +183,37 @@ void sendActuatorCommand()
         PacketType::ACTUATOR_COMMAND;
 
 
-    // Alternate between two states
-    actuatorTestState =
-        !actuatorTestState;
+    // --------------------------------------------------------
+    // Alternate servo position
+    // --------------------------------------------------------
+
+    servoTestState =
+        !servoTestState;
 
 
-    if (actuatorTestState)
+    if (servoTestState)
     {
-        command.servoAngle = 45;
-        command.motorSpeed = 50;
-        command.buzzerEnabled = 1;
-        command.relayEnabled = 0;
+        commandedServoAngle = 45;
     }
     else
     {
-        command.servoAngle = 135;
-        command.motorSpeed = 0;
-        command.buzzerEnabled = 0;
-        command.relayEnabled = 1;
+        commandedServoAngle = 135;
     }
 
+
+    command.servoAngle =
+        commandedServoAngle;
+
+
+    // We haven't connected these yet.
+    command.motorSpeed = 0;
+    command.buzzerEnabled = 0;
+    command.relayEnabled = 0;
+
+
+    // --------------------------------------------------------
+    // Send over ESP-NOW
+    // --------------------------------------------------------
 
     bool queued =
         RobotNetwork::send(
@@ -197,6 +225,8 @@ void sendActuatorCommand()
 
     if (!queued)
     {
+        actuatorCommandDelivered = false;
+
         Serial.println(
             "[MASTER] Actuator command failed to queue"
         );
@@ -205,69 +235,49 @@ void sendActuatorCommand()
     }
 
 
+    // Give ESP-NOW callback a moment to report delivery.
     delay(20);
 
 
+    actuatorCommandDelivered =
+        RobotNetwork::lastSendSucceeded();
+
+
+    // --------------------------------------------------------
+    // Serial debug
+    // --------------------------------------------------------
+
     Serial.println();
     Serial.println(
-        "---- SENT ACTUATOR COMMAND ----"
+        "---- ACTUATOR COMMAND SENT ----"
     );
 
-
     Serial.print(
-        "Servo: "
+        "Servo Angle: "
     );
 
     Serial.println(
-        command.servoAngle
+        commandedServoAngle
     );
-
-
-    Serial.print(
-        "Motor: "
-    );
-
-    Serial.println(
-        command.motorSpeed
-    );
-
-
-    Serial.print(
-        "Buzzer: "
-    );
-
-    Serial.println(
-        command.buzzerEnabled
-            ? "ON"
-            : "OFF"
-    );
-
-
-    Serial.print(
-        "Relay: "
-    );
-
-    Serial.println(
-        command.relayEnabled
-            ? "ON"
-            : "OFF"
-    );
-
 
     Serial.print(
         "Delivery: "
     );
 
     Serial.println(
-        RobotNetwork::lastSendSucceeded()
+        actuatorCommandDelivered
             ? "SUCCESS"
             : "FAILED"
+    );
+
+    Serial.println(
+        "-------------------------------"
     );
 }
 
 
 // ============================================================
-// Process received packets
+// Process received ESP-NOW packets
 // ============================================================
 
 void processPacket(
@@ -288,9 +298,13 @@ void processPacket(
     memcpy(
         &header,
         message.data,
-        sizeof(header)
+        sizeof(PacketHeader)
     );
 
+
+    // --------------------------------------------------------
+    // Validate protocol
+    // --------------------------------------------------------
 
     if (
         header.protocolVersion !=
@@ -300,6 +314,10 @@ void processPacket(
         return;
     }
 
+
+    // --------------------------------------------------------
+    // Packet must belong to MASTER
+    // --------------------------------------------------------
 
     if (
         header.destination !=
@@ -348,6 +366,10 @@ void processPacket(
         lastSensorPacketMs =
             millis();
 
+
+        // ----------------------------------------------------
+        // Serial output
+        // ----------------------------------------------------
 
         Serial.print(
             "[MASTER] Distance: "
@@ -555,7 +577,7 @@ void setup()
 
 
     // ========================================================
-    // Register ACTUATOR as a peer
+    // Register ACTUATOR as peer
     // ========================================================
 
     if (
@@ -592,6 +614,11 @@ void setup()
     delay(500);
 
     updateDisplay();
+
+
+    Serial.println(
+        "[MASTER] Servo wireless test ready"
+    );
 }
 
 
@@ -602,7 +629,7 @@ void setup()
 void loop()
 {
     // ========================================================
-    // Receive sensor packets
+    // Receive SENSOR packets
     // ========================================================
 
     NetworkMessage message;
@@ -620,7 +647,7 @@ void loop()
 
 
     // ========================================================
-    // Refresh OLED
+    // Update OLED
     // ========================================================
 
     static unsigned long
@@ -639,7 +666,7 @@ void loop()
 
 
     // ========================================================
-    // Send actuator test command
+    // Send servo command every 3 seconds
     // ========================================================
 
     static unsigned long
